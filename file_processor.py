@@ -10,7 +10,7 @@ import logging
 
 # Set up Google Cloud credentials
 # The path to the mounted secret file
-key_path = "/etc/secrets/skoolme-service-account"
+key_path = "/etc/secrets/skoolme-service-account.json"
 if os.path.exists(key_path):
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
 else:
