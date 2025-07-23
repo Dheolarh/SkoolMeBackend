@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-# Allow only the deployed Vercel frontend domain for CORS
+# Allow all origins for CORS
 CORS(app)
 
 # Configuration
@@ -30,9 +30,24 @@ app.config['TEMP_FOLDER'] = 'temp'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['TEMP_FOLDER'], exist_ok=True)
 
+
 # File processors
 file_processor = FileProcessor()
 audio_processor = AudioProcessor()
+
+# Google Cloud Storage setup
+GCS_BUCKET_NAME = "skoolme-uploads"
+storage_client = storage.Client()
+bucket = storage_client.bucket(GCS_BUCKET_NAME)
+
+def upload_file_to_gcs(file_stream, destination_blob_name):
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_file(file_stream)
+    return blob.public_url
+
+def download_file_from_gcs(blob_name, local_path):
+    blob = bucket.blob(blob_name)
+    blob.download_to_filename(local_path)
 
 # In-memory storage for progress tracking
 analysis_progress = {}
@@ -110,7 +125,7 @@ def upload_files():
         for file in files:
             if file.filename == '':
                 continue
-            
+
             # Determine file type
             file_type = get_file_type(file.filename)
             if not file_type:
@@ -118,7 +133,7 @@ def upload_files():
                     'error': f'Unsupported file type: {file.filename}',
                     'message': 'Please upload only supported file types'
                 }), 400
-            
+
             # Validate file size
             if not validate_file_size(file, file_type):
                 max_size = "50MB" if file_type == 'audio' else "100MB"
@@ -126,17 +141,18 @@ def upload_files():
                     'error': f'File too large: {file.filename}',
                     'message': f'Maximum file size for {file_type} files is {max_size}'
                 }), 400
-            
-            # Save file
+
+            # Upload file to GCS
             filename = secure_filename(file.filename)
-            file_path = os.path.join(session_folder, filename)
-            file.save(file_path)
-            
+            gcs_path = f"{session_id}/{filename}"
+            file.seek(0)
+            upload_file_to_gcs(file, gcs_path)
+
             uploaded_files.append({
                 'filename': filename,
                 'original_name': file.filename,
                 'file_type': file_type,
-                'size': os.path.getsize(file_path)
+                'gcs_path': gcs_path
             })
         
         return jsonify({
@@ -203,37 +219,42 @@ def analyze_files():
 def process_files_async(session_id, session_folder):
     """Process files asynchronously and update progress"""
     try:
-        files = [f for f in os.listdir(session_folder) if os.path.isfile(os.path.join(session_folder, f))]
+        # List files in GCS for this session
+        blobs = list(bucket.list_blobs(prefix=f"{session_id}/"))
+        files = [blob.name.split("/", 1)[1] for blob in blobs if "/" in blob.name and blob.name.split("/", 1)[1]]
         total_files = len(files)
-        
+
         analysis_progress[session_id]['status'] = 'processing'
         analysis_progress[session_id]['message'] = f'Processing {total_files} files...'
-        
+
         all_content = []
         file_results = []
-        
+
         for i, filename in enumerate(files):
-            file_path = os.path.join(session_folder, filename)
+            gcs_path = f"{session_id}/{filename}"
+            local_path = os.path.join(app.config['TEMP_FOLDER'], filename)
+            # Download file from GCS to temp folder
+            download_file_from_gcs(gcs_path, local_path)
             file_type = get_file_type(filename)
-            
+
             # Update progress
             progress = int((i / total_files) * 80)  # 80% for file processing
             analysis_progress[session_id]['progress'] = progress
             analysis_progress[session_id]['message'] = f'Processing {filename}...'
-            
+
             try:
                 # Process file based on type with optimized handling
                 if file_type == 'document':
-                    content = file_processor.process_file(file_path)
+                    content = file_processor.process_file(local_path)
                 elif file_type == 'audio':
-                    content = audio_processor.process_audio(file_path)
+                    content = audio_processor.process_audio(local_path)
                 else:
                     logger.warning(f"Unknown file type for {filename}")
                     continue
-                
+
                 # Calculate extraction score using optimized method
                 score = calculate_extraction_score(content)
-                
+
                 file_result = {
                     'filename': filename,
                     'file_type': file_type,
@@ -241,11 +262,11 @@ def process_files_async(session_id, session_folder):
                     'score': score,
                     'status': get_score_status(score)
                 }
-                
+
                 file_results.append(file_result)
                 if content and content.strip():
                     all_content.append(content)
-                
+
             except Exception as e:
                 logger.error(f"Error processing {filename}: {str(e)}")
                 file_result = {
@@ -257,18 +278,18 @@ def process_files_async(session_id, session_folder):
                     'error': str(e)
                 }
                 file_results.append(file_result)
-        
+
         # Calculate overall score more efficiently
         if file_results:
             valid_scores = [r['score'] for r in file_results if r['score'] > 0]
             overall_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0
         else:
             overall_score = 0
-        
+
         # Finalize analysis
         analysis_progress[session_id]['progress'] = 100
         analysis_progress[session_id]['message'] = 'Analysis completed successfully'
-        
+
         # Update final results with optimized content joining
         analysis_progress[session_id].update({
             'status': 'completed',
@@ -279,7 +300,7 @@ def process_files_async(session_id, session_folder):
             'all_content': '\n\n'.join(all_content) if all_content else '',
             'session_id': session_id  # Add session_id for frontend reference
         })
-        
+
     except Exception as e:
         logger.error(f"Async processing error: {str(e)}")
         analysis_progress[session_id].update({
