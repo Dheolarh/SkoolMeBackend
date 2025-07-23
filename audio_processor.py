@@ -10,7 +10,13 @@ from google.cloud import speech_v1p1beta1 as speech
 from google.cloud import storage
 
 # Set up Google Cloud credentials
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "skoolme-ocr-b933da63cd81.json"
+# The path to the mounted secret file
+key_path = "/etc/secrets/skoolme-service-account"
+if os.path.exists(key_path):
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_path
+else:
+    # This will help you debug if the secret is not mounted correctly
+    print("Secret not found at:", key_path)
 
 logger = logging.getLogger(__name__)
 
